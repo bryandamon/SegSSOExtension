@@ -1,0 +1,140 @@
+<?php
+
+class SpecialSSOUserLogin extends UnlistedSpecialPage
+{
+	function __construct()
+	{
+		parent::__construct( 'SSOUserLogin' );
+	}
+
+	function execute( $par )
+	{
+		global $wgRequest, $wgOut, $wgUser;
+
+		if( session_id() == '' )
+		{
+			wfSetupSession();
+		}
+
+		$this->setHeaders();
+
+		try
+		{
+			$authenticated = SSOUtil::isAuthenticated();
+
+			if($authenticated)
+			{
+				try
+				{
+					$ssoUserInfo = SSOUtil::getCustomer();
+				}
+				catch (Exception $e)
+				{
+					$ssoUserInfo = false;
+					processException('Failed to retrieve SSO customer info.', $e);
+				}
+
+				if($ssoUserInfo)
+				{
+					// a login token is required
+					LoginForm::setLoginToken();
+					$loginToken = LoginForm::getLoginToken();
+
+					// Submit a fake login form to authenticate the user.
+					$params = array(
+                	'wpName' => $ssoUserInfo["UserName"],
+                    'wpPassword' => 'DummyP@ssword',
+                    'wpDomain' => '',
+                    'wpRemember' => '',
+					'wpLoginToken' => $loginToken
+					);
+
+					$req = new FauxRequest($params);
+					$loginForm = new LoginForm($req);
+					$result = $loginForm->authenticateUserData();
+
+					if($result == LoginForm::SUCCESS)
+					{
+						$wgUser->setCookies();
+						LoginForm::clearLoginToken();
+					}
+					else
+					{
+						error_log('Unexpected SSO user authentication failure. Error code was: '. $result);
+					}
+				}
+
+				$this->processRedirect();
+			}
+			else
+			{
+				$currentUrl = HttpUtil::get_current_url();
+				$queryString = parse_url($currentUrl, PHP_URL_QUERY);
+
+				// replace the 'returntoquery' parameter with the base64-encoded 'b64returntoquery'
+				$rtqParam = $wgRequest->getVal('returntoquery');
+				if($rtqParam != '')
+				{
+					$b64rtqParam = HttpUtil::base64UrlEncode($rtqParam);
+					$query = $wgRequest->getValues();
+					unset($query['returntoquery']);
+					$query['b64returntoquery'] = $b64rtqParam;
+					$newQueryString = wfArrayToCGI($query);
+					$currentUrl = str_replace($queryString, $newQueryString, $currentUrl);
+				}
+
+				try
+				{
+					// redirect to SSO login
+					$ssoLoginURL = SSOUtil::getSSOLoginUrl($currentUrl);
+					$wgOut->redirect($ssoLoginURL);
+				}
+				catch (Exception $e)
+				{
+					processException('Failed to build SSO login URL.', $e);
+					$this->processRedirect();
+				}
+			}
+		}
+		catch (Exception $e)
+		{
+			$authenticated = false;
+			processException('Failed to check authentication status.', $e);
+			$this->processRedirect();
+		}
+
+	}
+
+	private function processRedirect()
+	{
+		global $wgRequest, $wgOut;
+
+		$returnToParam = $wgRequest->getVal('returnto');
+		$returnToQueryParam = $wgRequest->getVal('returntoquery');
+		$base64returnToQueryParam = $wgRequest->getVal('b64returntoquery');
+
+		// check if we have a base64-encoded returntoquery, which we send to the SSO server
+		// during a login request to prevent the SSO server from prematurely url-decoding
+		// the returntoquery parameter.
+		if($returnToQueryParam == '' && $base64returnToQueryParam != '')
+		{
+			$returnToQueryParam = HttpUtil::base64UrlDecode($base64returnToQueryParam);
+		}
+
+		if(!isset($returnToParam)
+		|| empty($returnToParam)
+		|| $returnToParam == Title::makeName(NS_SPECIAL, 'Userlogout')
+		|| $returnToParam == Title::makeName(NS_SPECIAL, 'UserLogout'))
+		{
+			// if no returnto page is specified, go to the Main page.
+			$title = Title::newMainPage();
+		}
+		else
+		{
+			$title = Title::newFromText($returnToParam);
+		}
+
+		$returnUrl = $title->getFullURL($returnToQueryParam);
+		$wgOut->redirect($returnUrl);
+	}
+}
